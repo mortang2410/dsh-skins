@@ -150,17 +150,20 @@ describe('BackgroundController', () => {
     controller.dispose()
   })
 
-  it('wallpaper active suppresses the background blur layer even with nonzero blur (#777 decouple)', () => {
+  it('wallpaper active keeps the background blur layer so the sliders act on the wallpaper (fork change)', () => {
     document.documentElement.setAttribute('data-dsh-wallpaper-active', 'true')
     const { controller } = rig({ backgroundBlurEmpty: 6 })
-    expect(blurElement()).toBeNull()
-    controller.setBlurEmpty(10)
-    expect(blurElement()).toBeNull()
-    // Unmount wallpaper: the blur layer is allowed again on the next sync.
-    document.documentElement.removeAttribute('data-dsh-wallpaper-active')
+    // Fork change: upstream removed the layer here (#777 decouple); the layer
+    // sits at z-index -1 above the wallpaper (-3) and scrim (-2), so its
+    // backdrop-filter samples the wallpaper.
+    expect(blurElement()).not.toBeNull()
+    expect(blurElement()!.style.backdropFilter).toContain('blur(6px)')
     controller.setBlurEmpty(10)
     expect(blurElement()).not.toBeNull()
     expect(blurElement()!.style.backdropFilter).toContain('blur(10px)')
+    // Disabling the Background section still removes the layer with a wallpaper.
+    controller.setEnabled(false)
+    expect(blurElement()).toBeNull()
     controller.dispose()
   })
 

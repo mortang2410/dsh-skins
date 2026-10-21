@@ -381,6 +381,8 @@ export function apply(ctx: ClientContext): void {
       setVolume: value => wallpaper.setVolume(value),
       applySelection: descriptor => { void preview.runWallpaper(() => wallpaper.applySelection(descriptor)) },
       clearSelection: () => wallpaper.clearSelection(),
+      restoreMirrorPrefs: prefs => wallpaper.restoreMirrorPrefs(prefs),
+      restoreMirroredSelection: descriptor => wallpaper.restoreMirroredSelection(descriptor),
       sync: descriptor => wallpaper.sync(descriptor),
       tryOn: descriptor => { void preview.runWallpaper(() => wallpaper.tryOn(descriptor)) },
       exitTryOn: () => wallpaper.exitTryOn(),

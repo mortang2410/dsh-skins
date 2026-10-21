@@ -352,13 +352,12 @@ export class BackgroundController implements SkinBackgroundHandle {
    */
   private syncBlur(): void {
     if (this.disposed) return
-    if (this.hasWallpaper()) {
-      // The wallpaper module owns its own blur (wallpaperBlur); the skin-center
-      // background blur layer must stay off while a wallpaper is mounted so
-      // the two settings remain independent (#777 decouple).
-      this.removeBlurElement()
-      return
-    }
+    // Fork change (LOCAL-PATCH.md): upstream removed the blur layer whenever a
+    // wallpaper was mounted (#777 decouple), which left "Blur when empty" and
+    // "Blur with content" inert with a wallpaper. The wallpaper media layer
+    // sits at z-index -3 and its scrim at -2, so a blur layer at -1 samples
+    // the wallpaper; keep it and let the two sliders act on the wallpaper as
+    // their labels say.
     if (!this.enabledValue) {
       this.removeBlurElement()
       return
@@ -372,11 +371,6 @@ export class BackgroundController implements SkinBackgroundHandle {
   /** True when the conversation pane hosts at least one message row. */
   private hasConversationContent(): boolean {
     return document.querySelector(CONVERSATION_CONTENT_SELECTOR) !== null
-  }
-
-  /** True while a Wallpaper Engine wallpaper is mounted. */
-  private hasWallpaper(): boolean {
-    return document.documentElement.hasAttribute('data-dsh-wallpaper-active')
   }
 
   /** Create (if needed) and size the fixed backdrop-filter element. */

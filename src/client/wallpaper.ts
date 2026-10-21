@@ -28,6 +28,80 @@ import { setSceneBackdropActive } from './runtime/backdrop-scene.ts'
 /** The section key the Host schema declares (mirrors src/index.ts). */
 export const SKIN_WALLPAPER_NS = 'skin-wallpaper'
 
+/**
+ * Every `skin-wallpaper` field is volatile: the Host keeps none of them, so
+ * `scope.set()` answers `false` and nothing survives a reload on the Host
+ * side. These two localStorage keys hold the durable copy, and are why a
+ * selection and its preferences survive a reload (see LOCAL-PATCH.md).
+ */
+const WALLPAPER_PREFS_KEY = 'dsh-skin-wallpaper-prefs'
+const WALLPAPER_SELECTION_KEY = 'dsh-skin-wallpaper-selection'
+
+/**
+ * Fields whose write verdict is suppressed: the mirror, not the Host, owns
+ * them, so a refused Host write there is not a failure the user can act on.
+ * Unmirrored fields keep the Host verdict.
+ */
+const MIRRORED_WALLPAPER_FIELDS: ReadonlySet<string> = new Set([
+  'enabled', 'mode', 'fit', 'dim', 'wallpaperBlur', 'wallpaperOpacity',
+  'pauseOnHidden', 'sound', 'volume', 'selection', 'weLibraryDirs',
+])
+
+/** The mirrored wallpaper preferences, read back at boot. */
+export interface WallpaperMirrorPrefs {
+  enabled?: boolean
+  mode?: 'live' | 'frame'
+  fit?: 'cover' | 'contain' | 'fill'
+  dim?: number
+  wallpaperBlur?: number
+  wallpaperOpacity?: number
+  pauseOnHidden?: boolean
+  sound?: boolean
+  volume?: number
+  dirs?: string[]
+}
+
+/** Read the mirrored wallpaper selection, or '' when unreadable. */
+const readWallpaperSelection = (): string => {
+  try {
+    const value = window.localStorage.getItem(WALLPAPER_SELECTION_KEY)
+    return typeof value === 'string' ? value : ''
+  } catch {
+    return ''
+  }
+}
+
+/** Mirror the selection, or drop the key when the wallpaper is cleared. */
+const writeWallpaperSelection = (value: string): void => {
+  try {
+    if (value === '') window.localStorage.removeItem(WALLPAPER_SELECTION_KEY)
+    else window.localStorage.setItem(WALLPAPER_SELECTION_KEY, value)
+  } catch { /* private mode / quota: the in-memory state still renders */ }
+}
+
+/** Read the mirrored wallpaper preferences, or null when absent/unreadable. */
+const readWallpaperPrefs = (): WallpaperMirrorPrefs | null => {
+  try {
+    const raw = window.localStorage.getItem(WALLPAPER_PREFS_KEY)
+    if (typeof raw !== 'string' || raw === '') return null
+    const value = JSON.parse(raw) as unknown
+    return typeof value === 'object' && value !== null ? value as WallpaperMirrorPrefs : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Mirror the preference getters. Called from persist(), which only runs from
+ * the user-facing setters, so a Host resync cannot overwrite the mirror with
+ * schema defaults.
+ */
+const writeWallpaperPrefs = (prefs: WallpaperMirrorPrefs): void => {
+  try {
+    window.localStorage.setItem(WALLPAPER_PREFS_KEY, JSON.stringify(prefs))
+  } catch { /* private mode / quota: preferences stay in memory */ }
+}
+
 /** One wallpaper's render contract, as delivered by the inventory route. */
 export interface WallpaperDescriptor {
   id: string
@@ -189,6 +263,16 @@ export interface WallpaperHandle {
   applySelection(descriptor: WallpaperDescriptor): void
   /** Unmount + clear the persisted selection. */
   clearSelection(): void
+  /**
+   * Restore the mirrored preferences at boot: set the controller fields and
+   * re-render, without a Host write (the Host refuses every one of them).
+   */
+  restoreMirrorPrefs(prefs: WallpaperMirrorPrefs): void
+  /**
+   * Mount a descriptor resolved from the mirrored selection at boot: the
+   * state applySelection would set, without its Host write.
+   */
+  restoreMirroredSelection(descriptor: WallpaperDescriptor): void
   /**
    * Reconcile the mounted layer with the persisted selection: the card
    * resolves the selection id against the inventory and calls this with the
@@ -438,13 +522,22 @@ export class WallpaperController implements WallpaperHandle {
     // opacity (both sit at schema defaults), seed values tuned for the
     // current light/dark theme so text is readable out of the box.
     this.applyThemeDefaults()
-    if (this.enabledValue && this.selectionValue) {
+    // The mirror overlay makes selectionValue non-empty at boot even though
+    // the Host stored none; installBootRestore owns that restore, with its
+    // retry loop, so only a Host-stored selection fetches here.
+    const hostSelection = this.scope.getSnapshot().value?.selection
+    if (this.enabledValue && typeof hostSelection === 'string' && hostSelection !== '') {
       this.fetchAndSync()
     }
   }
 
   private fetchAndSync(): void {
     if (!this.selectionValue || !this.doc) return
+    // A selection that exists only in the mirror is restored by
+    // installBootRestore, which retries; letting this path fetch too cost a
+    // second inventory GET on every boot and one per Host publication when
+    // the id is missing from the library.
+    if (this.applied === null && this.selectionValue === readWallpaperSelection()) return
     const targetId = this.selectionValue
     const fetchFn = this.options.fetchImpl ?? (typeof fetch !== 'undefined' ? fetch.bind(this.doc.defaultView ?? globalThis) : undefined)
     if (!fetchFn) return
@@ -661,10 +754,69 @@ export class WallpaperController implements WallpaperHandle {
    * card is the only place that can tell them it did not persist.
    */
   private persist(field: string, value: unknown): void {
+    // Every persist() field is mirrored: write the durable copy first, then
+    // queue the Host write whose refusal is expected for these volatile fields.
+    if (MIRRORED_WALLPAPER_FIELDS.has(field)) writeWallpaperPrefs(this.mirrorPrefs())
     void this.scope.set(field, value).then(
-      accepted => { this.reportWrite(accepted ? null : 'the Host did not accept the wallpaper setting') },
+      accepted => {
+        // The mirror already carries these fields across reloads, so a refused
+        // Host write is not a failure the user can act on; reporting it made a
+        // wallpaper that does persist look broken.
+        this.reportWrite(accepted || MIRRORED_WALLPAPER_FIELDS.has(field)
+          ? null
+          : 'the Host did not accept the wallpaper setting')
+      },
       (error: unknown) => { this.reportWrite(error instanceof Error ? error.message : String(error)) },
     )
+  }
+
+  /** The controller fields the preferences mirror stores. */
+  private mirrorPrefs(): WallpaperMirrorPrefs {
+    return {
+      enabled: this.enabledValue,
+      mode: this.modeValue,
+      fit: this.fitValue,
+      dim: this.dimValue,
+      wallpaperBlur: this.blurValue,
+      wallpaperOpacity: this.opacityValue,
+      pauseOnHidden: this.pauseOnHiddenValue,
+      sound: this.soundValue,
+      volume: this.volumeValue,
+      dirs: this.dirsValue,
+    }
+  }
+
+  /** Overlay a mirrored preference set onto the controller fields. */
+  private overlayMirrorPrefs(prefs: WallpaperMirrorPrefs | null): void {
+    if (prefs === null) return
+    if (typeof prefs.enabled === 'boolean') this.enabledValue = prefs.enabled
+    if (prefs.mode === 'live' || prefs.mode === 'frame') this.modeValue = prefs.mode
+    if (prefs.fit === 'cover' || prefs.fit === 'contain' || prefs.fit === 'fill') this.fitValue = prefs.fit
+    if (typeof prefs.dim === 'number' && Number.isFinite(prefs.dim)) this.dimValue = clamp(prefs.dim, 0, 90)
+    if (typeof prefs.wallpaperBlur === 'number' && Number.isFinite(prefs.wallpaperBlur)) this.blurValue = clamp(prefs.wallpaperBlur, 0, 60)
+    if (typeof prefs.wallpaperOpacity === 'number' && Number.isFinite(prefs.wallpaperOpacity)) this.opacityValue = clamp(prefs.wallpaperOpacity, 0, 100)
+    if (typeof prefs.pauseOnHidden === 'boolean') this.pauseOnHiddenValue = prefs.pauseOnHidden
+    if (typeof prefs.sound === 'boolean') this.soundValue = prefs.sound
+    if (typeof prefs.volume === 'number' && Number.isFinite(prefs.volume)) this.volumeValue = clamp(prefs.volume, 0, 100)
+    if (Array.isArray(prefs.dirs)) {
+      this.dirsValue = prefs.dirs.filter((dir): dir is string => typeof dir === 'string' && dir.trim() !== '')
+    }
+  }
+
+  restoreMirrorPrefs(prefs: WallpaperMirrorPrefs): void {
+    this.overlayMirrorPrefs(prefs)
+    this.render()
+    this.publish()
+  }
+
+  restoreMirroredSelection(descriptor: WallpaperDescriptor): void {
+    this.failedIds.delete(descriptor.id)
+    this.applied = descriptor
+    this.selectionValue = descriptor.id
+    writeWallpaperSelection(descriptor.id)
+    this.render()
+    this.publish()
+    this.probeSceneCapabilitiesIfNeeded(descriptor)
   }
 
   /** Publish one write verdict (null = the last write landed). */
@@ -741,6 +893,7 @@ export class WallpaperController implements WallpaperHandle {
     this.applied = descriptor
     this.previewing = null
     this.selectionValue = descriptor.id
+    writeWallpaperSelection(descriptor.id)
     this.render()
     this.publish()
     this.persist('selection', descriptor.id)
@@ -751,6 +904,7 @@ export class WallpaperController implements WallpaperHandle {
     this.applied = null
     this.previewing = null
     this.selectionValue = ''
+    writeWallpaperSelection('')
     this.render()
     this.publish()
     this.persist('selection', '')
@@ -829,6 +983,10 @@ export class WallpaperController implements WallpaperHandle {
    * adjusted either slider keep their values (#1051).
    */
   private applyThemeDefaults(): void {
+    // A mirror means the wallpaper setup was saved once already: its dim and
+    // opacity are the durable user values, so theme seeding must not override
+    // them (fork change; the Host keeps neither field).
+    if (readWallpaperPrefs() !== null) return
     const snapshot = this.scope.getSnapshot()
     const value = snapshot.value ?? {}
     // Detect whether dim and opacity have never been written to the section.
@@ -866,7 +1024,9 @@ export class WallpaperController implements WallpaperHandle {
     // in src/index.ts); this fallback only covers a form that has not resolved
     // yet, so it must not re-derive the platform in the browser.
     this.enabledValue = typeof value.enabled === 'boolean' ? value.enabled : true
-    this.selectionValue = typeof value.selection === 'string' ? value.selection : ''
+    this.selectionValue = typeof value.selection === 'string' && value.selection !== ''
+      ? value.selection
+      : readWallpaperSelection()
     this.modeValue = value.mode === 'frame' ? 'frame' : 'live'
     const rawFit = value.fit
     this.fitValue = rawFit === 'contain' || rawFit === 'fill' ? rawFit : 'cover'
@@ -885,6 +1045,10 @@ export class WallpaperController implements WallpaperHandle {
     this.dirsValue = Array.isArray(value.weLibraryDirs)
       ? value.weLibraryDirs.filter((d): d is string => typeof d === 'string' && d.trim() !== '')
       : []
+    // The Host keeps none of these fields (volatile), so a resync that
+    // republishes the scope snapshot would reset them to schema defaults.
+    // The mirror is the durable copy; overlay it on every read.
+    this.overlayMirrorPrefs(readWallpaperPrefs())
   }
 
   /** Resume a policy-blocked video on the first user gesture (#580). */
@@ -1475,24 +1639,44 @@ export function resolveSelection(wallpapers: WallpaperDescriptor[], selection: s
  */
 export function installBootRestore(wallpaper: WallpaperHandle): void {
   let synced = false
+  let running = false
   const restore = (): void => {
-    if (synced) return
+    if (synced || running) return
     const selected = wallpaper.selection()
     if (selected === '') return
-    synced = true
+    running = true
     void (async () => {
-      try {
-        const response = await fetch('/api/skin-center/we/inventory')
-        if (!response.ok) return
-        const payload = await response.json().catch(() => null) as { ok?: boolean; wallpapers?: WallpaperDescriptor[] } | null
-        if (payload?.ok !== true || !Array.isArray(payload.wallpapers)) return
-        const match = resolveSelection(payload.wallpapers, selected)
-        if (match !== undefined) wallpaper.sync(match)
-      } catch {
-        // Best-effort: the panel re-resolves on open.
+      let payload: { ok?: boolean; wallpapers?: WallpaperDescriptor[] } | null = null
+      // The terminal flag is set only after an inventory read succeeds: one
+      // slow or partial library scan used to end the restore for the page.
+      for (let attempt = 0; attempt < 8 && payload === null; attempt += 1) {
+        try {
+          const response = await fetch('/api/skin-center/we/inventory')
+          if (!response.ok) throw new Error('inventory')
+          const body = (await response.json().catch(() => null)) as
+            { ok?: boolean; wallpapers?: WallpaperDescriptor[] } | null
+          if (body?.ok !== true || !Array.isArray(body.wallpapers)) throw new Error('inventory')
+          payload = body
+        } catch {
+          await new Promise<void>((resolve) => { setTimeout(resolve, 600) })
+        }
       }
+      running = false
+      if (payload === null) return
+      synced = true
+      const match = resolveSelection(payload.wallpapers ?? [], selected)
+      // A choice, a clear or a try-on that happened while the inventory was in
+      // flight wins over this restore.
+      if (match === undefined || wallpaper.selection() !== selected || wallpaper.trying()) return
+      // No Host write at boot: the mirror already holds the selection.
+      wallpaper.restoreMirroredSelection(match)
     })()
   }
+  // Mirrored preferences first: they hold the wallpaper setup the Host refuses
+  // to keep. render() inside restoreMirrorPrefs applies fit, blur, opacity,
+  // dim and enabled.
+  const prefs = readWallpaperPrefs()
+  if (prefs !== null) wallpaper.restoreMirrorPrefs(prefs)
   restore()
-  wallpaper.subscribe(restore)
+  wallpaper.subscribe(() => { restore() })
 }

@@ -110,6 +110,9 @@ function layers(): HTMLElement[] {
 
 beforeEach(() => {
   document.body.innerHTML = ''
+  // The fork mirrors selection/preferences in localStorage (LOCAL-PATCH.md);
+  // clear it so one test's writes cannot restore into the next.
+  window.localStorage.clear()
 })
 
 describe('WallpaperController', () => {
@@ -713,17 +716,24 @@ describe('WallpaperController', () => {
     controller.dispose()
   })
 
-  it('user sees a Host-refused wallpaper write as a failed save', async () => {
-    // Given a wallpaper card whose writes the Host refuses (0.1.7 answers a
-    // refusal or a skipped write with `false` instead of rejecting it)
-    const { scope } = fakeScope({}, false)
+  it('keeps a Host-refused wallpaper write in the mirror without a failure notice (fork change)', async () => {
+    // Given a card whose writes the Host refuses (0.1.7 answers a refusal or a
+    // skipped write with `false` instead of rejecting it)
+    const attempted: string[] = []
+    const { scope } = fakeScope({}, field => { attempted.push(field); return false })
     const controller = new WallpaperController(scope)
 
     // When the user switches the wallpaper feature off
     controller.setEnabled(false)
+    await new Promise(resolve => { setTimeout(resolve, 10) })
 
-    // Then the card reports a failed save instead of a saved setting
-    await vi.waitFor(() => { expect(controller.writeError()).toContain('did not accept') })
+    // Then the write was attempted, the mirror holds it, and the card shows no
+    // failure the user cannot act on (the mirror is the durable copy).
+    expect(attempted).toContain('enabled')
+    expect(controller.writeError()).toBeNull()
+    const mirror = JSON.parse(window.localStorage.getItem('dsh-skin-wallpaper-prefs') ?? 'null') as
+      { enabled?: boolean } | null
+    expect(mirror?.enabled).toBe(false)
     controller.dispose()
   })
 
@@ -741,20 +751,17 @@ describe('WallpaperController', () => {
     controller.dispose()
   })
 
-  it('user sees the failed-save notice clear once a later write lands', async () => {
-    // Given a card whose first write is refused
-    let accept = false
-    const { scope } = fakeScope({}, () => accept)
+  it('restores mirrored selection and preferences when the Host snapshot is empty (fork change)', () => {
+    window.localStorage.setItem('dsh-skin-wallpaper-selection', '333')
+    window.localStorage.setItem('dsh-skin-wallpaper-prefs', JSON.stringify({
+      mode: 'frame', dim: 40, dirs: ['/x'],
+    }))
+    const { scope } = fakeScope({})
     const controller = new WallpaperController(scope)
-    controller.setMode('frame')
-    await vi.waitFor(() => { expect(controller.writeError()).toContain('did not accept') })
-
-    // When a later write is accepted
-    accept = true
-    controller.setMode('live')
-
-    // Then the notice is gone, so the card stops claiming a failure
-    await vi.waitFor(() => { expect(controller.writeError()).toBeNull() })
+    expect(controller.selection()).toBe('333')
+    expect(controller.mode()).toBe('frame')
+    expect(controller.dim()).toBe(40)
+    expect(controller.dirs()).toEqual(['/x'])
     controller.dispose()
   })
 
@@ -1241,13 +1248,15 @@ describe('WallpaperController', () => {
 
 })
 
-/** A minimal fake WallpaperHandle recording every sync() call. */
+/** A minimal fake WallpaperHandle recording every sync() and boot restore. */
 function fakeHandle(selection: string): {
   handle: WallpaperHandle
   synced: Array<WallpaperDescriptor | null>
+  restored: WallpaperDescriptor[]
   listeners: Set<() => void>
 } {
   const synced: Array<WallpaperDescriptor | null> = []
+  const restored: WallpaperDescriptor[] = []
   const listeners = new Set<() => void>()
   const handle: WallpaperHandle = {
     enabled: () => true,
@@ -1280,13 +1289,15 @@ function fakeHandle(selection: string): {
     setVolume: () => {},
     applySelection: () => {},
     clearSelection: () => {},
+    restoreMirrorPrefs: () => {},
+    restoreMirroredSelection: descriptor => { restored.push(descriptor) },
     sync: descriptor => { synced.push(descriptor) },
     tryOn: () => {},
     exitTryOn: () => {},
     recoverScenePlayer: () => {},
     dispose: () => {},
   }
-  return { handle, synced, listeners }
+  return { handle, synced, restored, listeners }
 }
 
 /** Stub global fetch with one JSON payload. */
@@ -1323,64 +1334,77 @@ describe('installBootRestore', () => {
 
   it('mounts the persisted selection at boot from the inventory', async () => {
     stubInventory([video, scene])
-    const { handle, synced } = fakeHandle('333')
+    const { handle, restored } = fakeHandle('333')
     installBootRestore(handle)
-    await vi.waitFor(() => expect(synced).toHaveLength(1))
-    expect(synced[0]).toEqual(scene)
+    await vi.waitFor(() => expect(restored).toHaveLength(1))
+    expect(restored[0]).toEqual(scene)
   })
 
   it('resolves the imported copy for a bare id', async () => {
     const imported: WallpaperDescriptor = { ...scene, id: 'imported/333' }
     stubInventory([imported])
-    const { handle, synced } = fakeHandle('333')
+    const { handle, restored } = fakeHandle('333')
     installBootRestore(handle)
-    await vi.waitFor(() => expect(synced).toHaveLength(1))
-    expect(synced[0]).toEqual(imported)
+    await vi.waitFor(() => expect(restored).toHaveLength(1))
+    expect(restored[0]).toEqual(imported)
   })
 
   it('does nothing without a persisted selection', async () => {
     const fetchMock = stubInventory([video])
-    const { handle, synced } = fakeHandle('')
+    const { handle, restored } = fakeHandle('')
     installBootRestore(handle)
     await new Promise(resolve => setTimeout(resolve, 10))
     expect(fetchMock).not.toHaveBeenCalled()
-    expect(synced).toHaveLength(0)
+    expect(restored).toHaveLength(0)
   })
 
-  it('skips sync when the selection is not in the inventory', async () => {
+  it('skips restore when the selection is not in the inventory', async () => {
     const fetchMock = stubInventory([video])
-    const { handle, synced } = fakeHandle('missing')
+    const { handle, restored } = fakeHandle('missing')
     installBootRestore(handle)
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled())
-    expect(synced).toHaveLength(0)
+    expect(restored).toHaveLength(0)
   })
 
-  it('skips sync when the inventory errors', async () => {
-    const fetchMock = stubInventory([], false)
-    const { handle, synced } = fakeHandle('333')
-    installBootRestore(handle)
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled())
-    expect(synced).toHaveLength(0)
+  it('skips restore when the inventory errors', async () => {
+    // The restore retries 8 times with a 600ms backoff; fake timers drain them.
+    vi.useFakeTimers()
+    try {
+      const fetchMock = stubInventory([], false)
+      const { handle, restored } = fakeHandle('333')
+      installBootRestore(handle)
+      await vi.runAllTimersAsync()
+      expect(fetchMock).toHaveBeenCalled()
+      expect(restored).toHaveLength(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('stays silent when the inventory fetch rejects', async () => {
-    const mock = vi.fn(async () => { throw new Error('offline') })
-    vi.stubGlobal('fetch', mock)
-    const { handle, synced } = fakeHandle('333')
-    installBootRestore(handle)
-    await vi.waitFor(() => expect(mock).toHaveBeenCalled())
-    expect(synced).toHaveLength(0)
+    vi.useFakeTimers()
+    try {
+      const mock = vi.fn(async () => { throw new Error('offline') })
+      vi.stubGlobal('fetch', mock)
+      const { handle, restored } = fakeHandle('333')
+      installBootRestore(handle)
+      await vi.runAllTimersAsync()
+      expect(mock).toHaveBeenCalled()
+      expect(restored).toHaveLength(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
-  it('syncs only once even when the selection arrives later', async () => {
+  it('restores only once even when the selection arrives later', async () => {
     stubInventory([video, scene])
-    const { handle, synced, listeners } = fakeHandle('')
+    const { handle, restored, listeners } = fakeHandle('')
     installBootRestore(handle)
     // A later settings publish now reports the persisted selection.
     handle.selection = () => '333'
     for (const listener of listeners) listener()
-    await vi.waitFor(() => expect(synced).toHaveLength(1))
-    expect(synced[0]).toEqual(scene)
+    await vi.waitFor(() => expect(restored).toHaveLength(1))
+    expect(restored[0]).toEqual(scene)
   })
 })
 
