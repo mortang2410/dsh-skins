@@ -24,10 +24,13 @@
  * IntersectionObserver does the visibility work, so scrolling costs no
  * per-frame query. Rows streaming in are processed from their own mutation
  * records (`performance-guidelines-v1` R1): a record outside the conversation
- * scrollport is discarded after one containment check, and a record inside it
- * observes only the added subtree instead of re-scanning the transcript. A full
- * scan runs at install, when the shell rebuilds the scrollport, and for a bulk
- * insert large enough that per-node queries would cost more.
+ * scrollport is discarded after one containment check, a record inside it
+ * observes only the added subtree instead of re-scanning the transcript, and a
+ * watched attribute write re-scans that element's subtree because a plate can be
+ * a descendant of the element that gained the attribute (the response body under
+ * its flow row). A full scan runs at install, when the shell rebuilds the
+ * scrollport, and for a bulk insert large enough that per-node queries would
+ * cost more.
  *
  * Two failure modes must not cost the page its frost: a boot that runs before
  * the body exists installs once parsing reaches it, and a browser without
@@ -102,12 +105,26 @@ export function installFrostWindow(doc: Document): () => void {
     // window instead of being refused: refusing would let the first teardown
     // delete the only observer while the second caller still expects a window.
     existing.refs += 1
-    return () => releaseFrostWindow(doc, existing)
+    return releaseHandle(doc, existing)
   }
   const window: FrostWindow = { refs: 1, dispose: () => {} }
   windows.set(doc, window)
   window.dispose = startFrostWindow(doc)
-  return () => releaseFrostWindow(doc, window)
+  return releaseHandle(doc, window)
+}
+
+/**
+ * One caller's release, valid once. A shutdown path that runs twice (an effect
+ * that also runs on unmount, a defensive dispose) must not consume another
+ * caller's reference and tear down a window they still hold.
+ */
+function releaseHandle(doc: Document, window: FrostWindow): () => void {
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    releaseFrostWindow(doc, window)
+  }
 }
 
 /** Drop one installer's claim; the last one tears the window down. */
@@ -181,9 +198,19 @@ function installWindow(doc: Document, view: Window & typeof globalThis): () => v
     observer?.observe(el)
   }
 
-  /** Forget a plate that left the transcript, and take its marker with it. */
+  /** Whether an element no longer belongs to the conversation this window covers. */
+  function outsideConversation(el: Element): boolean {
+    return anchor !== null && !anchor.contains(el)
+  }
+
+  /**
+   * Forget a plate that left the transcript or the conversation, and take its
+   * marker with it: a virtualizer that re-inserts a cached row must not bring
+   * back a filter the window never re-granted.
+   */
   function forget(el: Element): void {
-    if (!tracked.has(el) || el.isConnected) return
+    if (!tracked.has(el)) return
+    if (el.isConnected && !outsideConversation(el)) return
     el.removeAttribute(FROST_NEAR_ATTR)
     observer?.unobserve(el)
     tracked.delete(el)
@@ -205,6 +232,28 @@ function installWindow(doc: Document, view: Window & typeof globalThis): () => v
     for (const plate of node.querySelectorAll(FROST_PLATE_SELECTOR)) track(plate)
   }
 
+  /** No-observer mode: track and mark every plate one added subtree holds. */
+  function markSubtree(node: Element): void {
+    if (!node.isConnected) return
+    if (node.matches(FROST_PLATE_SELECTOR)) {
+      track(node)
+      mark(node, true)
+    }
+    for (const plate of node.querySelectorAll(FROST_PLATE_SELECTOR)) {
+      track(plate)
+      mark(plate, true)
+    }
+  }
+
+  /** Mark every plate in the document (no-observer mode, full scan). */
+  function markAll(): void {
+    anchor = doc.querySelector(SCROLLPORT_SELECTOR)
+    for (const plate of doc.querySelectorAll(FROST_PLATE_SELECTOR)) {
+      track(plate)
+      mark(plate, true)
+    }
+  }
+
   /** Apply what the mutation records collected, once per frame. */
   function scan(): void {
     frame = null
@@ -212,16 +261,12 @@ function installWindow(doc: Document, view: Window & typeof globalThis): () => v
     if (!observes) {
       // No observer: keep the pre-window behaviour, blur on every plate. A new
       // subtree only needs marking, so this stays proportional to the insert.
-      if (needsFullScan || anchor === null || !anchor.isConnected) {
-        anchor = doc.querySelector(SCROLLPORT_SELECTOR)
-        for (const plate of doc.querySelectorAll(FROST_PLATE_SELECTOR)) mark(plate, true)
-      }
-      for (const node of added) {
-        if (!node.isConnected) continue
-        if (node.matches(FROST_PLATE_SELECTOR)) mark(node, true)
-        for (const plate of node.querySelectorAll(FROST_PLATE_SELECTOR)) mark(plate, true)
-      }
+      if (needsFullScan || anchor === null || !anchor.isConnected) markAll()
+      for (const node of added) markSubtree(node)
       added.clear()
+      // Removal-only batches still need the marker taken off the node, because
+      // teardown can no longer reach a plate that left the document.
+      for (const node of removed) forget(node)
       removed.clear()
       needsFullScan = false
       return
@@ -229,7 +274,7 @@ function installWindow(doc: Document, view: Window & typeof globalThis): () => v
     // A batch that would add more rows than the transcript already holds is a
     // bulk render (session restore, session switch): one scan of the scrollport
     // costs less than a query per record. Measured at 1000 rows in jsdom:
-    // 200 added rows cost 14 ms incrementally and 32 ms as a scan.
+    // 200 added rows cost about 15 ms incrementally and 32 ms as a scan.
     const bulk = added.size > tracked.size
     if (needsFullScan || anchor === null || !anchor.isConnected || bulk) {
       needsFullScan = false
@@ -258,18 +303,18 @@ function installWindow(doc: Document, view: Window & typeof globalThis): () => v
   const collect = (records: MutationRecord[]): boolean => {
     if (records.length === 0) return false
     if (!observes) {
-      // Without a window there is nothing to filter against: every insertion can
-      // carry a plate.
+      // Without a window there is nothing to filter against: every insertion and
+      // removal can carry a plate.
       needsFullScan ||= anchor === null || !anchor.isConnected
       for (const record of records) {
         if (record.type === 'attributes') {
-          if (record.target.nodeType === 1 && (record.target as Element).matches(FROST_PLATE_SELECTOR)) added.add(record.target as Element)
+          if (record.target.nodeType === 1) added.add(record.target as Element)
           continue
         }
         for (const node of record.addedNodes) if (node.nodeType === 1) added.add(node as Element)
         for (const node of record.removedNodes) if (node.nodeType === 1) removed.add(node as Element)
       }
-      return added.size > 0 || needsFullScan
+      return added.size > 0 || removed.size > 0 || needsFullScan
     }
     if (anchor === null || !anchor.isConnected) {
       // The shell rebuilt the scrollport; only a full scan can find the new one.
@@ -281,7 +326,10 @@ function installWindow(doc: Document, view: Window & typeof globalThis): () => v
       if (record.target !== anchor && !anchor.contains(record.target)) continue
       relevant = true
       if (record.type === 'attributes') {
-        if (record.target.nodeType === 1 && (record.target as Element).matches(FROST_PLATE_SELECTOR)) added.add(record.target as Element)
+        // A plate can be a descendant of the element that gained the attribute
+        // (the response body under its flow row), so the subtree is the
+        // candidate, not the element alone.
+        if (record.target.nodeType === 1) added.add(record.target as Element)
         continue
       }
       for (const node of record.addedNodes) if (node.nodeType === 1) added.add(node as Element)
@@ -302,12 +350,8 @@ function installWindow(doc: Document, view: Window & typeof globalThis): () => v
     attributes: true,
     attributeFilter: PLATE_ATTRIBUTES,
   })
-  if (!observes) {
-    anchor = doc.querySelector(SCROLLPORT_SELECTOR)
-    for (const plate of doc.querySelectorAll(FROST_PLATE_SELECTOR)) mark(plate, true)
-  } else {
-    scanAll()
-  }
+  if (observes) scanAll()
+  else markAll()
 
   return () => {
     disposed = true
@@ -317,10 +361,8 @@ function installWindow(doc: Document, view: Window & typeof globalThis): () => v
     }
     mutationRecords.disconnect()
     observer?.disconnect()
-    if (!observes) {
-      // The no-observer path marked plates it never tracked.
-      for (const plate of doc.querySelectorAll(FROST_PLATE_SELECTOR)) plate.removeAttribute(FROST_NEAR_ATTR)
-    }
+    // Every plate this window marked is in `tracked`, connected or not, so a
+    // detached node cannot keep a marker after teardown.
     for (const plate of tracked) plate.removeAttribute(FROST_NEAR_ATTR)
     tracked.clear()
     added.clear()

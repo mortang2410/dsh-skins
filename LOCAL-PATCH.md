@@ -66,7 +66,7 @@ Base: tag `v0.4.4` (commit `540acca`). Package name and plugin id stay
 | `src/client/background.ts` | `syncBlur()` keeps the blur layer with a wallpaper; `hasWallpaper()` removed. |
 | `src/client/wallpaper.ts` | Mirror constants/helpers, `WallpaperMirrorPrefs`, mirror writes in `persist()`, selection writes in `applySelection()`/`clearSelection()`, `readAll()` overlay, theme-seed guard, constructor fetch guard, `fetchAndSync()` mirror guard, `restoreMirrorPrefs()`, `restoreMirroredSelection()`, rewritten `installBootRestore()`. |
 | `src/client/index.ts` | Handle exposes `restoreMirrorPrefs` / `restoreMirroredSelection`. |
-| `src/client/runtime/frost-window.ts` | New: sets `data-dsh-frost-near` on chat rows inside the viewport plus a 400px margin, via `IntersectionObserver` (visibility) and a `MutationObserver` scoped to the conversation scrollport. Mutation records outside that scrollport are dropped after one containment check, added subtrees are observed incrementally, and a full scrollport scan runs only at install, on a scrollport rebuild, or for an insert larger than the tracked set. Reference-counted per document; installs after `body` exists; without `IntersectionObserver` every plate keeps its blur. Marks `html` with `data-dsh-frost-window` while installed. |
+| `src/client/runtime/frost-window.ts` | New: sets `data-dsh-frost-near` on chat rows inside the viewport plus a 400px margin, via `IntersectionObserver` (visibility) and a `MutationObserver` scoped to the conversation scrollport. Mutation records outside that scrollport are dropped after one containment check, added subtrees are observed incrementally, and a full scrollport scan runs only at install, on a scrollport rebuild, or for an insert larger than the tracked set. Reference-counted per document with one release per handle; installs after `body` exists; a watched plate-attribute write re-scans that element's subtree; a plate moved out of the scrollport is dropped. Without `IntersectionObserver` every plate keeps its blur, and teardown clears markers on detached nodes too. Marks `html` with `data-dsh-frost-window` while installed. |
 | `tests/frost-window.spec.ts` | New: marker enter/leave, detached-row marker cleanup, no-observer fallback, body-late install, two installers and disposal order, scrollport scoping, zero scans for mutations outside the conversation, incremental add and late-attribute observation. |
 | `src/client/runtime/boot.ts` | Installs the frost window next to the shell rendering adapter and disposes it from `shutdown()`. |
 | `lib/client.js` | Shipped browser bundle. Rebuilt from `src/` with the tree's `tsdown` (0.22.14 parses this tree again, so the hand-patch caveat no longer applies); it now also carries the frost window. |
@@ -105,7 +105,7 @@ Checks that do run with the current tree:
 ```bash
 ./node_modules/.bin/tsc -p tsconfig.json --noEmit     # exits 0
 ./node_modules/.bin/tsdown                            # builds lib/ from src/
-./node_modules/.bin/vitest run                        # 52 files, 766 tests
+./node_modules/.bin/vitest run                        # 52 files, 770 tests
 ```
 
 ## Verification (live profile)

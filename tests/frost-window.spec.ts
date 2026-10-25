@@ -259,6 +259,88 @@ describe('installFrostWindow', () => {
     dispose()
   })
 
+  it('observes the response body when its row gains the plate attributes later', async () => {
+    const { scrollport } = buildConversation(0)
+    const row = document.createElement('div')
+    const body = document.createElement('div')
+    body.className = 'Hub_body'
+    row.appendChild(body)
+    scrollport.appendChild(row)
+
+    const dispose = installFrostWindow(document)
+    const observer = FakeObserver.live[0]
+    // The row carries neither attribute yet, so nothing matches the response
+    // selector and the body is not observed.
+    expect(observer.targets.has(body)).toBe(false)
+
+    row.setAttribute('data-chat-flow-kind', 'assistant-step')
+    row.setAttribute('data-chat-group-part', 'response')
+    await deliverMutations()
+    flushFrames()
+
+    expect(observer.targets.has(body)).toBe(true)
+
+    dispose()
+  })
+
+  it('releases each install handle once, even when a caller disposes twice', () => {
+    const { rows } = buildConversation(1)
+    const first = installFrostWindow(document)
+    const second = installFrostWindow(document)
+
+    first()
+    // A repeated release must not consume the other caller's reference.
+    first()
+    expect(document.documentElement.hasAttribute(FROST_WINDOW_ATTR)).toBe(true)
+    FakeObserver.live[0].fire(rows[0], true)
+    expect(rows[0].hasAttribute(FROST_NEAR_ATTR)).toBe(true)
+
+    second()
+    expect(document.documentElement.hasAttribute(FROST_WINDOW_ATTR)).toBe(false)
+  })
+
+  it('forgets a row moved outside the conversation scrollport', async () => {
+    const { rows } = buildConversation(1)
+    const dispose = installFrostWindow(document)
+    const observer = FakeObserver.live[0]
+    observer.fire(rows[0], true)
+    expect(rows[0].hasAttribute(FROST_NEAR_ATTR)).toBe(true)
+
+    document.body.appendChild(rows[0])
+    await deliverMutations()
+    flushFrames()
+
+    expect(observer.targets.has(rows[0])).toBe(false)
+    expect(rows[0].hasAttribute(FROST_NEAR_ATTR)).toBe(false)
+
+    dispose()
+  })
+
+  it('clears fallback markers from detached rows', async () => {
+    delete (window as { IntersectionObserver?: unknown }).IntersectionObserver
+    const { scrollport, rows } = buildConversation(1)
+    const dispose = installFrostWindow(document)
+    expect(rows[0].hasAttribute(FROST_NEAR_ATTR)).toBe(true)
+
+    rows[0].remove()
+    await deliverMutations()
+    flushFrames()
+    expect(rows[0].hasAttribute(FROST_NEAR_ATTR)).toBe(false)
+
+    const late = document.createElement('div')
+    late.setAttribute('data-chat-flow-kind', 'context')
+    scrollport.appendChild(late)
+    await deliverMutations()
+    flushFrames()
+    expect(late.hasAttribute(FROST_NEAR_ATTR)).toBe(true)
+
+    // Detach without giving the next frame a chance to clean it: teardown owns
+    // the marker from here.
+    late.remove()
+    dispose()
+    expect(late.hasAttribute(FROST_NEAR_ATTR)).toBe(false)
+  })
+
   it('tears down cleanly and ignores a frame queued before teardown', async () => {
     const { rows } = buildConversation(1)
     const dispose = installFrostWindow(document)
