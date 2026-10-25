@@ -254,6 +254,18 @@ function installWindow(doc: Document, view: Window & typeof globalThis): () => v
     }
   }
 
+  /**
+   * Prune one removed subtree. The removed node itself is often not a plate (a
+   * flow-row wrapper holds the response body deeper down), so every tracked
+   * plate inside it is forgotten as well; forget() still keeps a plate that was
+   * re-parented back inside the scrollport.
+   */
+  function forgetSubtree(node: Element): void {
+    forget(node)
+    if (tracked.size === 0) return
+    for (const plate of node.querySelectorAll(FROST_PLATE_SELECTOR)) forget(plate)
+  }
+
   /** Apply what the mutation records collected, once per frame. */
   function scan(): void {
     frame = null
@@ -266,7 +278,7 @@ function installWindow(doc: Document, view: Window & typeof globalThis): () => v
       added.clear()
       // Removal-only batches still need the marker taken off the node, because
       // teardown can no longer reach a plate that left the document.
-      for (const node of removed) forget(node)
+      for (const node of removed) forgetSubtree(node)
       removed.clear()
       needsFullScan = false
       return
@@ -284,7 +296,7 @@ function installWindow(doc: Document, view: Window & typeof globalThis): () => v
       for (const node of added) scanSubtree(node)
       added.clear()
     }
-    for (const node of removed) forget(node)
+    for (const node of removed) forgetSubtree(node)
     removed.clear()
     anchor = anchor?.isConnected === true ? anchor : doc.querySelector(SCROLLPORT_SELECTOR)
   }

@@ -105,7 +105,7 @@ Checks that do run with the current tree:
 ```bash
 ./node_modules/.bin/tsc -p tsconfig.json --noEmit     # exits 0
 ./node_modules/.bin/tsdown                            # builds lib/ from src/
-./node_modules/.bin/vitest run                        # 52 files, 770 tests
+./node_modules/.bin/vitest run                        # 52 files, 771 tests
 ```
 
 ## Verification (live profile)

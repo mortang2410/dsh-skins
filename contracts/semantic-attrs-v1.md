@@ -45,7 +45,7 @@
 | `data-dsh-wallpaper-active` | html + body（body/html 级，另行管理） | WE 壁纸挂载期间置 `true`，卸载 / 禁用清除；供皮肤 CSS 与壁纸中和规则锚定（#734） |
 | `data-dsh-composer-frost` | body 级空元素（元素级，owner: skin-center） | 皮肤中心在 backdrop-active 且 conversation-content 置位期间挂载的输入卡磨砂层：body 级 fixed 兄弟元素，按输入卡 border box 跟随（rAF 合并测量），仅承载 `backdrop-filter`；标记清除即移除。磨砂**不能**挂在输入卡上——非 none 的 `backdrop-filter` 会让卡片成为其 fixed 后代的包含块，把官方 tooltip 推进会话滚动口并撑高 `scrollHeight`（#1724） |
 | `data-dsh-wallpaper-surface` | 官方 shell 全视口背景元素 + 侧栏工作区淡化条（元素级） | `WallpaperController.markWallpaperSurfaces()` 在 WE 壁纸挂载期间打标（全视口 bg-base 背景 + `data-slot="sidebar.workspaces"` 内渐变淡化条），命中 `html[data-dsh-wallpaper-active] [data-dsh-wallpaper-surface]` 中和；卸载清除，不含哈希类依赖（#734） |
-| `data-dsh-frost-near` | 对话行（元素级，owner: skin-center） | 位于视口加 400px 范围内的聊天行置位（`runtime/frost-window.ts`，IntersectionObserver 驱动）：滚出范围即清除，节点被移除或移出会话滚动口时清除。皮肤的行级磨砂规则以它为唯一开关（`patches.css` 中的 reasoning、tool-call、turn-process、response 体、context、compaction 等），用于压住 WebKit 的 document 级 `backdrop-filter` 元素上限：无本标记的行只保留底色、不模糊 |
+| `data-dsh-frost-near` | 对话行（元素级，owner: skin-center） | 位于视口加 400px 范围内的聊天行置位（`runtime/frost-window.ts`，`IntersectionObserver` 可用时）：滚出范围即清除，节点被移除或移出会话滚动口时清除。浏览器没有 `IntersectionObserver` 时该模块退化为给全部聊天行置位，不再维护范围语义（这是降级路径，不是缺陷）。皮肤的行级磨砂规则以它为唯一开关（`patches.css` 中的 reasoning、tool-call、turn-process、response 体、context、compaction 等），用于压住 WebKit 的 document 级 `backdrop-filter` 元素上限：无本标记的行只保留底色、不模糊 |
 | `data-dsh-frost-window` | html（body/html 级，另行管理） | `runtime/frost-window.ts` 安装期间置位，卸载清除。只表示运行时在场，样式不依赖它（行级规则只认 `data-dsh-frost-near`），因此缺 `data-dsh-frost-window` 不改变任何外观 |
 
 ## part 组（81 行，含各 owner 行）

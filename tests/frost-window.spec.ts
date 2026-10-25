@@ -316,6 +316,34 @@ describe('installFrostWindow', () => {
     dispose()
   })
 
+  it('forgets a response plate whose wrapper is moved outside the scrollport', async () => {
+    const { scrollport } = buildConversation(0)
+    const wrapper = document.createElement('div')
+    wrapper.setAttribute('data-chat-flow-kind', 'assistant-step')
+    wrapper.setAttribute('data-chat-group-part', 'response')
+    const body = document.createElement('div')
+    body.className = 'Hub_body'
+    wrapper.appendChild(body)
+    scrollport.appendChild(wrapper)
+
+    const dispose = installFrostWindow(document)
+    const observer = FakeObserver.live[0]
+    expect(observer.targets.has(body)).toBe(true)
+
+    observer.fire(body, true)
+    expect(body.hasAttribute(FROST_NEAR_ATTR)).toBe(true)
+
+    // The tracked node is the nested body, not the wrapper being removed.
+    document.body.appendChild(wrapper)
+    await deliverMutations()
+    flushFrames()
+
+    expect(observer.targets.has(body)).toBe(false)
+    expect(body.hasAttribute(FROST_NEAR_ATTR)).toBe(false)
+
+    dispose()
+  })
+
   it('clears fallback markers from detached rows', async () => {
     delete (window as { IntersectionObserver?: unknown }).IntersectionObserver
     const { scrollport, rows } = buildConversation(1)
