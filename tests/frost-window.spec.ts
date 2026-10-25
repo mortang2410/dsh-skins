@@ -73,6 +73,21 @@ function buildConversation(rowCount: number): { scrollport: HTMLElement; rows: H
   return { scrollport, rows }
 }
 
+/** Handles installed by the current test; released in afterEach even on failure. */
+const disposers: Array<() => void> = []
+
+/**
+ * Install the window and remember its release. A failing assertion must not
+ * skip the release: the module keys windows per document, so a leaked handle
+ * would make every following test share a stale window and fail for the wrong
+ * reason.
+ */
+function install(): () => void {
+  const dispose = installFrostWindow(document)
+  disposers.push(dispose)
+  return dispose
+}
+
 beforeEach(() => {
   frames = []
   FakeObserver.live = []
@@ -87,6 +102,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  while (disposers.length > 0) disposers.pop()?.()
   document.body.innerHTML = ''
   document.documentElement.removeAttribute(FROST_WINDOW_ATTR)
 })
@@ -94,7 +110,7 @@ afterEach(() => {
 describe('installFrostWindow', () => {
   it('marks a row while it is near and clears it when it leaves', () => {
     const { rows } = buildConversation(2)
-    const dispose = installFrostWindow(document)
+    const dispose = install()
 
     expect(document.documentElement.hasAttribute(FROST_WINDOW_ATTR)).toBe(true)
     const observer = FakeObserver.live[0]
@@ -114,7 +130,7 @@ describe('installFrostWindow', () => {
     delete (window as { IntersectionObserver?: unknown }).IntersectionObserver
     const { rows } = buildConversation(3)
 
-    const dispose = installFrostWindow(document)
+    const dispose = install()
 
     expect(rows.every(row => row.hasAttribute(FROST_NEAR_ATTR))).toBe(true)
 
@@ -128,7 +144,7 @@ describe('installFrostWindow', () => {
     const realBody = document.body
     Object.defineProperty(document, 'body', { configurable: true, get: () => null })
 
-    const dispose = installFrostWindow(document)
+    const dispose = install()
     expect(document.documentElement.hasAttribute(FROST_WINDOW_ATTR)).toBe(false)
     expect(FakeObserver.live).toHaveLength(0)
 
@@ -144,8 +160,8 @@ describe('installFrostWindow', () => {
 
   it('keeps the window alive while a second installer still holds it', () => {
     const { rows } = buildConversation(1)
-    const first = installFrostWindow(document)
-    const second = installFrostWindow(document)
+    const first = install()
+    const second = install()
 
     // One observer for the document, not one per installer.
     expect(FakeObserver.live).toHaveLength(1)
@@ -162,7 +178,7 @@ describe('installFrostWindow', () => {
 
   it('drops the marker from a row it forgets', async () => {
     const { rows } = buildConversation(2)
-    const dispose = installFrostWindow(document)
+    const dispose = install()
     const observer = FakeObserver.live[0]
 
     observer.fire(rows[0], true)
@@ -184,7 +200,7 @@ describe('installFrostWindow', () => {
     stray.setAttribute('data-chat-flow-kind', 'reasoning')
     document.body.appendChild(stray)
 
-    const dispose = installFrostWindow(document)
+    const dispose = install()
     const observer = FakeObserver.live[0]
 
     expect(observer.targets.has(rows[0])).toBe(true)
@@ -195,7 +211,7 @@ describe('installFrostWindow', () => {
 
   it('does not scan for mutations outside the conversation', async () => {
     const { rows } = buildConversation(1)
-    const dispose = installFrostWindow(document)
+    const dispose = install()
     expect(FakeObserver.live[0].targets.has(rows[0])).toBe(true)
 
     const sidebar = document.createElement('div')
@@ -210,7 +226,7 @@ describe('installFrostWindow', () => {
 
   it('observes a row inserted into the conversation', async () => {
     const { scrollport } = buildConversation(1)
-    const dispose = installFrostWindow(document)
+    const dispose = install()
     const observer = FakeObserver.live[0]
 
     const row = document.createElement('div')
@@ -226,7 +242,7 @@ describe('installFrostWindow', () => {
 
   it('does not re-scan the transcript for one inserted row', async () => {
     const { scrollport } = buildConversation(40)
-    const dispose = installFrostWindow(document)
+    const dispose = install()
     const scan = vi.spyOn(document, 'querySelectorAll')
 
     const row = document.createElement('div')
@@ -242,7 +258,7 @@ describe('installFrostWindow', () => {
 
   it('observes an element that becomes a plate after insertion', async () => {
     const { scrollport } = buildConversation(0)
-    const dispose = installFrostWindow(document)
+    const dispose = install()
     const observer = FakeObserver.live[0]
 
     const late = document.createElement('div')
@@ -267,7 +283,7 @@ describe('installFrostWindow', () => {
     row.appendChild(body)
     scrollport.appendChild(row)
 
-    const dispose = installFrostWindow(document)
+    const dispose = install()
     const observer = FakeObserver.live[0]
     // The row carries neither attribute yet, so nothing matches the response
     // selector and the body is not observed.
@@ -285,8 +301,8 @@ describe('installFrostWindow', () => {
 
   it('releases each install handle once, even when a caller disposes twice', () => {
     const { rows } = buildConversation(1)
-    const first = installFrostWindow(document)
-    const second = installFrostWindow(document)
+    const first = install()
+    const second = install()
 
     first()
     // A repeated release must not consume the other caller's reference.
@@ -301,7 +317,7 @@ describe('installFrostWindow', () => {
 
   it('forgets a row moved outside the conversation scrollport', async () => {
     const { rows } = buildConversation(1)
-    const dispose = installFrostWindow(document)
+    const dispose = install()
     const observer = FakeObserver.live[0]
     observer.fire(rows[0], true)
     expect(rows[0].hasAttribute(FROST_NEAR_ATTR)).toBe(true)
@@ -326,7 +342,7 @@ describe('installFrostWindow', () => {
     wrapper.appendChild(body)
     scrollport.appendChild(wrapper)
 
-    const dispose = installFrostWindow(document)
+    const dispose = install()
     const observer = FakeObserver.live[0]
     expect(observer.targets.has(body)).toBe(true)
 
@@ -347,7 +363,7 @@ describe('installFrostWindow', () => {
   it('clears fallback markers from detached rows', async () => {
     delete (window as { IntersectionObserver?: unknown }).IntersectionObserver
     const { scrollport, rows } = buildConversation(1)
-    const dispose = installFrostWindow(document)
+    const dispose = install()
     expect(rows[0].hasAttribute(FROST_NEAR_ATTR)).toBe(true)
 
     rows[0].remove()
@@ -371,7 +387,7 @@ describe('installFrostWindow', () => {
 
   it('tears down cleanly and ignores a frame queued before teardown', async () => {
     const { rows } = buildConversation(1)
-    const dispose = installFrostWindow(document)
+    const dispose = install()
 
     rows[0].appendChild(document.createElement('span'))
     await deliverMutations()
