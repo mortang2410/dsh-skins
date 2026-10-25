@@ -47,6 +47,17 @@ Base: tag `v0.4.4` (commit `540acca`). Package name and plugin id stay
    only the rows in and near the viewport with `data-dsh-frost-near`, and the
    skin's frost rules key on that marker. Offscreen rows keep their tint and drop
    only the blur, so the live count stays near the dozen rows a viewport holds.
+   The observer work follows `contracts/performance-guidelines-v1.md` R1: a
+   record outside the conversation scrollport is dropped after one containment
+   check, an added subtree is queried on its own, and the full scrollport scan
+   runs only at install, when the shell rebuilds the scrollport, or when one
+   batch adds more rows than the transcript already holds. Measured in jsdom at
+   1000 rows: one streamed row costs 0.2 ms of frame work instead of 25 ms, and
+   100 composer or sidebar insertions schedule no scan at all. The window is
+   reference-counted per document, so an overlapping boot cannot disarm the live
+   one; a boot that runs before `body` exists installs once parsing reaches it;
+   and a browser without `IntersectionObserver` keeps every plate blurred, which
+   is the behaviour before the window existed.
 
 ## Files
 
@@ -55,7 +66,8 @@ Base: tag `v0.4.4` (commit `540acca`). Package name and plugin id stay
 | `src/client/background.ts` | `syncBlur()` keeps the blur layer with a wallpaper; `hasWallpaper()` removed. |
 | `src/client/wallpaper.ts` | Mirror constants/helpers, `WallpaperMirrorPrefs`, mirror writes in `persist()`, selection writes in `applySelection()`/`clearSelection()`, `readAll()` overlay, theme-seed guard, constructor fetch guard, `fetchAndSync()` mirror guard, `restoreMirrorPrefs()`, `restoreMirroredSelection()`, rewritten `installBootRestore()`. |
 | `src/client/index.ts` | Handle exposes `restoreMirrorPrefs` / `restoreMirroredSelection`. |
-| `src/client/runtime/frost-window.ts` | New: sets `data-dsh-frost-near` on chat rows inside the viewport plus a 400px margin, via `IntersectionObserver` (visibility) and `MutationObserver` (rows streaming in), scanned once per animation frame. Marks `html` with `data-dsh-frost-window` while installed. |
+| `src/client/runtime/frost-window.ts` | New: sets `data-dsh-frost-near` on chat rows inside the viewport plus a 400px margin, via `IntersectionObserver` (visibility) and a `MutationObserver` scoped to the conversation scrollport. Mutation records outside that scrollport are dropped after one containment check, added subtrees are observed incrementally, and a full scrollport scan runs only at install, on a scrollport rebuild, or for an insert larger than the tracked set. Reference-counted per document; installs after `body` exists; without `IntersectionObserver` every plate keeps its blur. Marks `html` with `data-dsh-frost-window` while installed. |
+| `tests/frost-window.spec.ts` | New: marker enter/leave, detached-row marker cleanup, no-observer fallback, body-late install, two installers and disposal order, scrollport scoping, zero scans for mutations outside the conversation, incremental add and late-attribute observation. |
 | `src/client/runtime/boot.ts` | Installs the frost window next to the shell rendering adapter and disposes it from `shutdown()`. |
 | `lib/client.js` | Shipped browser bundle. Rebuilt from `src/` with the tree's `tsdown` (0.22.14 parses this tree again, so the hand-patch caveat no longer applies); it now also carries the frost window. |
 | `tests/background.spec.ts` | Asserts the layer survives a wallpaper and disappears when Background is disabled. |
@@ -93,7 +105,7 @@ Checks that do run with the current tree:
 ```bash
 ./node_modules/.bin/tsc -p tsconfig.json --noEmit     # exits 0
 ./node_modules/.bin/tsdown                            # builds lib/ from src/
-./node_modules/.bin/vitest run                        # 51 files, 755 tests
+./node_modules/.bin/vitest run                        # 52 files, 766 tests
 ```
 
 ## Verification (live profile)
@@ -110,7 +122,9 @@ In the browser, with a seeded mirror, a reload restores the wallpaper and its
 preferences and issues exactly one `/api/skin-center/we/inventory` GET. With a
 conversation on screen, `html[data-dsh-frost-window]` is present and
 `[data-dsh-frost-near]` sits on the rows inside the viewport, not on the rows far
-outside it.
+outside it, so `document.querySelectorAll('*')` filtered through
+`getComputedStyle` reports about a dozen elements with a non-none
+`backdrop-filter` instead of one per row.
 
 ## Upgrading upstream
 
